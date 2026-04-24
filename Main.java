@@ -277,3 +277,155 @@ class ConsoleUI {
         }
     }
 }
+
+class AuthService {
+    private static final int MAX_LOGIN_ATTEMPTS = 3;
+
+    private final Map<String, User> users;
+
+    AuthService(Map<String, User> users) {
+        this.users = users;
+    }
+
+    public User registerUser(String fullName, String cardNumber, String pin) throws AuthException {
+        validateFullName(fullName);
+        validateCardNumber(cardNumber);
+        validatePin(pin);
+
+        if (users.containsKey(cardNumber)) {
+            throw new AuthException("Пользователь с таким номером карты уже существует.");
+        }
+
+        User user = new User(fullName, cardNumber, pin, new Account(0.0));
+        users.put(cardNumber, user);
+        return user;
+    }
+
+    public User authenticate(String cardNumber, String pin) throws AuthException {
+        User user = findUser(cardNumber);
+
+        if (user == null) {
+            throw new AuthException("Пользователь с таким номером карты не найден.");
+        }
+
+        if (user.isBlocked()) {
+            throw new AuthException("Карта заблокирована. Обратитесь в банк.");
+        }
+
+        if (user.getPin().equals(pin)) {
+            user.resetFailedAttempts();
+            return user;
+        }
+
+        user.incrementFailedAttempts();
+        int attemptsLeft = MAX_LOGIN_ATTEMPTS - user.getFailedAttempts();
+
+        if (attemptsLeft <= 0) {
+            user.block();
+            throw new AuthException("Карта заблокирована после 3 неудачных попыток.");
+        }
+
+        throw new AuthException("Неверный PIN. Осталось попыток: " + attemptsLeft);
+    }
+
+    public User findUser(String cardNumber) {
+        return users.get(cardNumber);
+    }
+
+    public static void validateCardNumber(String cardNumber) throws AuthException {
+        if (cardNumber == null || !cardNumber.matches("\\d{16}")) {
+            throw new AuthException("Номер карты должен содержать ровно 16 цифр.");
+        }
+    }
+
+    public static void validatePin(String pin) throws AuthException {
+        if (pin == null || !pin.matches("\\d{4}")) {
+            throw new AuthException("PIN должен содержать ровно 4 цифры.");
+        }
+    }
+
+    private void validateFullName(String fullName) throws AuthException {
+        if (fullName == null || fullName.trim().isEmpty()) {
+            throw new AuthException("Имя пользователя не может быть пустым.");
+        }
+    }
+}
+
+class BankService {
+    private final Map<String, User> users;
+
+    BankService(Map<String, User> users) {
+        this.users = users;
+    }
+
+    public double getBalance(User user) {
+        return user.getAccount().getBalance();
+    }
+
+    public void deposit(User user, double amount) throws BankException {
+        validateAmount(amount);
+        user.getAccount().deposit(amount);
+        user.addTransaction(new Transaction(
+                LocalDateTime.now(),
+                TransactionType.DEPOSIT,
+                amount,
+                "Пополнение счета"
+        ));
+    }
+
+    public void withdraw(User user, double amount) throws BankException {
+        validateAmount(amount);
+
+        if (user.getAccount().getBalance() < amount) {
+            throw new BankException("Недостаточно средств на счете.");
+        }
+
+        user.getAccount().withdraw(amount);
+        user.addTransaction(new Transaction(
+                LocalDateTime.now(),
+                TransactionType.WITHDRAW,
+                amount,
+                "Снятие наличных"
+        ));
+    }
+
+    public void transfer(User sender, String recipientCard, double amount) throws BankException {
+        validateAmount(amount);
+
+        User recipient = users.get(recipientCard);
+        if (recipient == null) {
+            throw new BankException("Получатель с таким номером карты не найден.");
+        }
+
+        if (sender.getCardNumber().equals(recipientCard)) {
+            throw new BankException("Нельзя переводить средства самому себе.");
+        }
+
+        if (sender.getAccount().getBalance() < amount) {
+            throw new BankException("Недостаточно средств для перевода.");
+        }
+
+        sender.getAccount().withdraw(amount);
+        recipient.getAccount().deposit(amount);
+
+        LocalDateTime now = LocalDateTime.now();
+        sender.addTransaction(new Transaction(
+                now,
+                TransactionType.TRANSFER_OUT,
+                amount,
+                "Перевод на карту " + recipientCard
+        ));
+        recipient.addTransaction(new Transaction(
+                now,
+                TransactionType.TRANSFER_IN,
+                amount,
+                "Перевод от карты " + sender.getCardNumber()
+        ));
+    }
+
+    private void validateAmount(double amount) throws BankException {
+        if (amount <= 0) {
+            throw new BankException("Сумма должна быть больше нуля.");
+        }
+    }
+}
