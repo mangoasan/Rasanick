@@ -428,4 +428,302 @@ class BankService {
             throw new BankException("Сумма должна быть больше нуля.");
         }
     }
+    
+}
+
+class DataStore {
+    private final Path filePath;
+
+    DataStore(Path filePath) {
+        this.filePath = filePath;
+    }
+
+    public Map<String, User> load() throws IOException {
+        Map<String, User> users = new HashMap<>();
+
+        if (!Files.exists(filePath)) {
+            return users;
+        }
+
+        List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
+        List<String[]> transactionRows = new ArrayList<>();
+
+        for (String line : lines) {
+            if (line == null || line.trim().isEmpty()) {
+                continue;
+            }
+
+            String[] parts = line.split("\\|", -1);
+            if (parts.length == 0) {
+                continue;
+            }
+
+            if ("USER".equals(parts[0])) {
+                loadUser(parts, users);
+            } else if ("TX".equals(parts[0])) {
+                transactionRows.add(parts);
+            }
+        }
+
+        for (String[] parts : transactionRows) {
+            loadTransaction(parts, users);
+        }
+
+        return users;
+    }
+
+    public void save(Map<String, User> users) throws IOException {
+        List<String> lines = new ArrayList<>();
+
+        users.values().stream()
+                .sorted(Comparator.comparing(User::getCardNumber))
+                .forEach(user -> {
+                    lines.add(String.join("|",
+                            "USER",
+                            user.getCardNumber(),
+                            user.getPin(),
+                            Boolean.toString(user.isBlocked()),
+                            Integer.toString(user.getFailedAttempts()),
+                            Double.toString(user.getAccount().getBalance()),
+                            encode(user.getFullName())
+                    ));
+
+                    for (Transaction transaction : user.getTransactions()) {
+                        lines.add(String.join("|",
+                                "TX",
+                                user.getCardNumber(),
+                                transaction.getTimestamp().toString(),
+                                transaction.getType().name(),
+                                Double.toString(transaction.getAmount()),
+                                encode(transaction.getDescription())
+                        ));
+                    }
+                });
+
+        if (filePath.getParent() != null) {
+            Files.createDirectories(filePath.getParent());
+        }
+
+        Files.write(filePath, lines, StandardCharsets.UTF_8);
+    }
+
+    private void loadUser(String[] parts, Map<String, User> users) {
+        if (parts.length < 7) {
+            return;
+        }
+
+        try {
+            String cardNumber = parts[1];
+            String pin = parts[2];
+            boolean blocked = Boolean.parseBoolean(parts[3]);
+            int failedAttempts = Integer.parseInt(parts[4]);
+            double balance = Double.parseDouble(parts[5]);
+            String fullName = decode(parts[6]);
+
+            User user = new User(fullName, cardNumber, pin, new Account(balance));
+            user.setBlocked(blocked);
+            user.setFailedAttempts(failedAttempts);
+            users.put(cardNumber, user);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void loadTransaction(String[] parts, Map<String, User> users) {
+        if (parts.length < 6) {
+            return;
+        }
+
+        try {
+            String cardNumber = parts[1];
+            User user = users.get(cardNumber);
+            if (user == null) {
+                return;
+            }
+
+            LocalDateTime timestamp = LocalDateTime.parse(parts[2]);
+            TransactionType type = TransactionType.valueOf(parts[3]);
+            double amount = Double.parseDouble(parts[4]);
+            String description = decode(parts[5]);
+
+            user.addTransaction(new Transaction(timestamp, type, amount, description));
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private String encode(String value) {
+        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String decode(String value) {
+        return new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8);
+    }
+}
+
+class User {
+    private final String fullName;
+    private final String cardNumber;
+    private final String pin;
+    private final Account account;
+    private final List<Transaction> transactions;
+
+    private boolean blocked;
+    private int failedAttempts;
+
+    User(String fullName, String cardNumber, String pin, Account account) {
+        this.fullName = fullName;
+        this.cardNumber = cardNumber;
+        this.pin = pin;
+        this.account = account;
+        this.transactions = new ArrayList<>();
+        this.blocked = false;
+        this.failedAttempts = 0;
+    }
+
+    public String getFullName() {
+        return fullName;
+    }
+
+    public String getCardNumber() {
+        return cardNumber;
+    }
+
+    public String getPin() {
+        return pin;
+    }
+
+    public Account getAccount() {
+        return account;
+    }
+
+    public boolean isBlocked() {
+        return blocked;
+    }
+
+    public int getFailedAttempts() {
+        return failedAttempts;
+    }
+
+    public void setBlocked(boolean blocked) {
+        this.blocked = blocked;
+    }
+
+    public void setFailedAttempts(int failedAttempts) {
+        this.failedAttempts = failedAttempts;
+    }
+
+    public void block() {
+        this.blocked = true;
+    }
+
+    public void incrementFailedAttempts() {
+        this.failedAttempts++;
+    }
+
+    public void resetFailedAttempts() {
+        this.failedAttempts = 0;
+    }
+
+    public void addTransaction(Transaction transaction) {
+        transactions.add(transaction);
+    }
+
+    public List<Transaction> getTransactions() {
+        return Collections.unmodifiableList(transactions);
+    }
+
+    public List<Transaction> getRecentTransactions(int limit) {
+        List<Transaction> recentTransactions = new ArrayList<>();
+
+        for (int i = transactions.size() - 1; i >= 0 && recentTransactions.size() < limit; i--) {
+            recentTransactions.add(transactions.get(i));
+        }
+
+        return recentTransactions;
+    }
+}
+
+class Account {
+    private double balance;
+
+    Account(double balance) {
+        this.balance = balance;
+    }
+
+    public double getBalance() {
+        return balance;
+    }
+
+    public void deposit(double amount) {
+        balance += amount;
+    }
+
+    public void withdraw(double amount) {
+        balance -= amount;
+    }
+}
+
+class Transaction {
+    private static final DateTimeFormatter DISPLAY_FORMAT =
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
+
+    private final LocalDateTime timestamp;
+    private final TransactionType type;
+    private final double amount;
+    private final String description;
+
+    Transaction(LocalDateTime timestamp, TransactionType type, double amount, String description) {
+        this.timestamp = timestamp;
+        this.type = type;
+        this.amount = amount;
+        this.description = description;
+    }
+
+    public LocalDateTime getTimestamp() {
+        return timestamp;
+    }
+
+    public TransactionType getType() {
+        return type;
+    }
+
+    public double getAmount() {
+        return amount;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public String getFormattedTimestamp() {
+        return timestamp.format(DISPLAY_FORMAT);
+    }
+}
+
+enum TransactionType {
+    DEPOSIT("Пополнение"),
+    WITHDRAW("Снятие"),
+    TRANSFER_IN("Входящий перевод"),
+    TRANSFER_OUT("Исходящий перевод");
+
+    private final String label;
+
+    TransactionType(String label) {
+        this.label = label;
+    }
+
+    public String getLabel() {
+        return label;
+    }
+}
+
+class AuthException extends Exception {
+    AuthException(String message) {
+        super(message);
+    }
+}
+
+class BankException extends Exception {
+    BankException(String message) {
+        super(message);
+    }
 }
